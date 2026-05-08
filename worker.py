@@ -17,6 +17,8 @@ from typing import Optional
 import requests
 from supabase import create_client, Client
 
+import notify
+
 # ---------- Config ----------
 COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
@@ -27,7 +29,7 @@ COINS = [
 # Risk / sizing — read from env so Render env vars can override without redeploy
 RISK_PCT       = float(os.getenv("RISK_PCT",       "1.0"))
 LEVERAGE       = float(os.getenv("LEVERAGE",       "10"))
-MAX_CONCURRENT = int(  os.getenv("MAX_CONCURRENT", "3"))
+MAX_CONCURRENT = int(float(os.getenv("MAX_CONCURRENT", "3")))
 ATR_SL_MULT    = float(os.getenv("ATR_SL_MULT",    "1.5"))
 ATR_TP_MULT    = float(os.getenv("ATR_TP_MULT",    "3.0"))
 
@@ -254,6 +256,7 @@ def open_position(symbol, a, account):
         f"OPEN {a['signal'].upper()} {symbol} @ {entry:.4f} · "
         f"SL {sl:.4f} · TP {tp:.4f} · risk ${risk_usd:.2f} · {a['reasons']}"
     )
+    notify.notify_open(symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"])
 
 
 def close_position(pos, exit_price, reason):
@@ -296,6 +299,7 @@ def close_position(pos, exit_price, reason):
         f"{tag} CLOSE {pos['side'].upper()} {pos['symbol']} @ {exit_price:.4f} · "
         f"{'+' if pnl >= 0 else ''}${pnl:.2f} ({'+' if r_mult >= 0 else ''}{r_mult:.2f}R) [{reason}]"
     )
+    notify.notify_close(pos["symbol"], pos["side"], pos["entry"], exit_price, pnl, r_mult, result, reason)
 
 
 def check_open_positions():
