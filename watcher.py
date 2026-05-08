@@ -1,13 +1,19 @@
 """
-Builds26 Crypto Auto — Position Watcher (v2)
-==============================================
+Builds26 Crypto Auto — Position Watcher (v2.1)
+================================================
 Long-running process that connects to Binance Futures WebSocket and monitors
 open paper positions in real-time. The moment any open position's mark price
 crosses its SL or TP, the watcher closes it in Supabase and fires a Telegram
 alert — within ~1 second of the actual touch.
 
-This replaces the previous cron-based 30-second polling. Latency drops from
-"up to 15 minutes" to "sub-second."
+v2.1 fixes a race condition where the sync_loop would run before the WebSocket
+finished connecting, cache the position list as "subscribed", and then never
+actually subscribe to the price feeds. Symptoms: positions opened, never closed,
+even when price clearly crossed SL/TP.
+
+Fix: subscription state is reset to empty on every (re)connect, and on_open
+unconditionally subscribes to all currently-open positions. The sync_loop
+remains as the periodic catch-up mechanism for newly-opened positions.
 
 Runs as a Render Background Worker (continuous, $7/month).
 """
@@ -42,6 +48,7 @@ _state = {
     "positions": {},
     "ws": None,
     "subscribed": set(),
+    "ws_ready": False,
     "lock": threading.Lock(),
 }
 
@@ -134,7 +141,14 @@ def _drop_position(symbol):
         _state["positions"].pop(symbol, None)
 
 
+def _ws_connected(ws):
+    return bool(ws and ws.sock and ws.sock.connected)
+
+
 def sync_subscriptions():
+    if not _state.get("ws_ready"):
+        return
+
     try:
         positions = get_open_positions()
     except Exception as e:
@@ -145,7 +159,7 @@ def sync_subscriptions():
     new_symbols = set(new_map.keys())
 
     with _state["lock"]:
-        old_symbols = _state["subscribed"]
+        old_symbols = _state["subscribed"].copy()
         _state["positions"] = new_map
 
     to_add = new_symbols - old_symbols
@@ -155,8 +169,8 @@ def sync_subscriptions():
         return
 
     ws = _state["ws"]
-    if not ws or not ws.sock or not ws.sock.connected:
-        log.info(f"sync: WS not connected, skipping subscribe ({len(new_symbols)} positions)")
+    if not _ws_connected(ws):
+        log.warning(f"sync: WS disconnected, will resync on reconnect ({len(new_symbols)} positions)")
         return
 
     if to_add:
@@ -165,8 +179,14 @@ def sync_subscriptions():
             "params": [f"{s.lower()}@markPrice@1s" for s in to_add],
             "id": int(time.time()),
         }
-        ws.send(json.dumps(sub_msg))
-        log.info(f"sync: subscribed to {sorted(to_add)}")
+        try:
+            ws.send(json.dumps(sub_msg))
+            with _state["lock"]:
+                _state["subscribed"].update(to_add)
+            log.info(f"sync: subscribed to {sorted(to_add)}")
+        except Exception as e:
+            log.error(f"sync: subscribe send failed: {e}")
+            return
 
     if to_remove:
         unsub_msg = {
@@ -174,11 +194,13 @@ def sync_subscriptions():
             "params": [f"{s.lower()}@markPrice@1s" for s in to_remove],
             "id": int(time.time()) + 1,
         }
-        ws.send(json.dumps(unsub_msg))
-        log.info(f"sync: unsubscribed from {sorted(to_remove)}")
-
-    with _state["lock"]:
-        _state["subscribed"] = new_symbols
+        try:
+            ws.send(json.dumps(unsub_msg))
+            with _state["lock"]:
+                _state["subscribed"].difference_update(to_remove)
+            log.info(f"sync: unsubscribed from {sorted(to_remove)}")
+        except Exception as e:
+            log.error(f"sync: unsubscribe send failed: {e}")
 
 
 def sync_loop():
@@ -193,6 +215,8 @@ def sync_loop():
 def on_message(ws, message):
     try:
         data = json.loads(message)
+        if isinstance(data, dict) and "result" in data and "id" in data:
+            return
         payload = data.get("data") or data
         if not isinstance(payload, dict):
             return
@@ -205,7 +229,12 @@ def on_message(ws, message):
 
 
 def on_open(ws):
-    log.info("WebSocket connected")
+    log.info("WebSocket connected — establishing subscriptions")
+
+    with _state["lock"]:
+        _state["subscribed"] = set()
+        _state["ws_ready"] = False
+
     try:
         positions = get_open_positions()
     except Exception as e:
@@ -217,7 +246,6 @@ def on_open(ws):
 
     with _state["lock"]:
         _state["positions"] = new_map
-        _state["subscribed"] = symbols
 
     if symbols:
         sub_msg = {
@@ -225,9 +253,17 @@ def on_open(ws):
             "params": [f"{s.lower()}@markPrice@1s" for s in symbols],
             "id": 1,
         }
-        ws.send(json.dumps(sub_msg))
-        log.info(f"initial subscribe: {sorted(symbols)}")
+        try:
+            ws.send(json.dumps(sub_msg))
+            with _state["lock"]:
+                _state["subscribed"] = symbols
+                _state["ws_ready"] = True
+            log.info(f"initial subscribe: {sorted(symbols)} ({len(symbols)} symbol(s))")
+        except Exception as e:
+            log.error(f"on_open: subscribe send failed: {e}")
     else:
+        with _state["lock"]:
+            _state["ws_ready"] = True
         log.info("no open positions on connect — watching for new positions")
 
 
@@ -237,11 +273,14 @@ def on_error(ws, err):
 
 def on_close(ws, code, msg):
     log.warning(f"WebSocket closed: code={code} msg={msg}")
+    with _state["lock"]:
+        _state["ws_ready"] = False
+        _state["subscribed"] = set()
 
 
 def run():
     log.info("=" * 60)
-    log.info("Crypto auto watcher (v2) — Binance Futures WebSocket")
+    log.info("Crypto auto watcher (v2.1) — Binance Futures WebSocket")
     log.info(f"resync every {RESYNC_INTERVAL}s · reconnect after {RECONNECT_DELAY}s on drop")
 
     t = threading.Thread(target=sync_loop, daemon=True)
