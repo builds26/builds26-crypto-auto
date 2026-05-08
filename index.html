@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Builds26 Signal Desk — Crypto Auto</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #11161f;
+    --panel-2: #161c27;
+    --border: #1f2937;
+    --text: #e6edf3;
+    --muted: #6b7785;
+    --accent: #00d4aa;
+    --long: #00d4aa;
+    --short: #ff5470;
+    --warn: #ffb454;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    background-image:
+      radial-gradient(circle at 20% 0%, rgba(0, 212, 170, 0.04), transparent 50%),
+      radial-gradient(circle at 80% 100%, rgba(255, 84, 112, 0.03), transparent 50%);
+  }
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    background: rgba(10, 14, 20, 0.8);
+    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark {
+    width: 32px; height: 32px;
+    background: linear-gradient(135deg, var(--accent), #007a63);
+    border-radius: 6px;
+    display: grid; place-items: center;
+    font-weight: 700;
+    color: #001a14;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .brand h1 { font-size: 16px; font-weight: 500; letter-spacing: 0.02em; }
+  .brand .sub { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.1em; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  main { padding: 24px; max-width: 1600px; margin: 0 auto; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); padding: 16px; border-radius: 8px; }
+  .stat .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 8px; font-family: 'JetBrains Mono', monospace; }
+  .stat .value { font-size: 22px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .stat .delta { font-size: 11px; margin-top: 4px; font-family: 'JetBrains Mono', monospace; }
+  .pos { color: var(--long); }
+  .neg { color: var(--short); }
+  .neu { color: var(--muted); }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1100px) { .panels { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .panel-head { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--panel-2); }
+  .panel-head h2 { font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.12em; font-family: 'JetBrains Mono', monospace; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 10px 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.1em; border-bottom: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; }
+  td { padding: 12px; border-bottom: 1px solid var(--border); font-family: 'JetBrains Mono', monospace; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .signal-tag { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: 0.05em; }
+  .signal-long { background: rgba(0, 212, 170, 0.12); color: var(--long); border: 1px solid rgba(0, 212, 170, 0.3); }
+  .signal-short { background: rgba(255, 84, 112, 0.12); color: var(--short); border: 1px solid rgba(255, 84, 112, 0.3); }
+  .empty { padding: 32px; text-align: center; color: var(--muted); font-size: 12px; font-family: 'JetBrains Mono', monospace; }
+  .resolved-win { color: var(--long); }
+  .resolved-loss { color: var(--short); }
+  .resolved-be { color: var(--warn); }
+  footer { text-align: center; padding: 24px; color: var(--muted); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+  .err-banner { background: rgba(255, 84, 112, 0.1); border: 1px solid var(--short); color: var(--short); padding: 12px; border-radius: 6px; margin-bottom: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-mark">B26</div>
+    <div>
+      <h1>Signal Desk — Crypto Auto</h1>
+      <div class="sub">Server-side · 1H Candles · Binance · Paper</div>
+    </div>
+  </div>
+  <div class="status-pill">
+    <span class="dot" id="status-dot"></span>
+    <span id="status-text" class="mono">LOADING…</span>
+  </div>
+</header>
+
+<main>
+
+  <div id="err" class="err-banner" style="display:none"></div>
+
+  <div class="stat-grid">
+    <div class="stat">
+      <div class="label">Equity</div>
+      <div class="value" id="stat-equity">—</div>
+      <div class="delta neu" id="stat-equity-delta">—</div>
+    </div>
+    <div class="stat">
+      <div class="label">Open Positions</div>
+      <div class="value" id="stat-open">—</div>
+      <div class="delta neu" id="stat-open-pnl">—</div>
+    </div>
+    <div class="stat">
+      <div class="label">Resolved</div>
+      <div class="value" id="stat-resolved">—</div>
+      <div class="delta neu" id="stat-record">—</div>
+    </div>
+    <div class="stat">
+      <div class="label">Win Rate</div>
+      <div class="value" id="stat-winrate">—</div>
+      <div class="delta neu" id="stat-expectancy">Expectancy: —</div>
+    </div>
+    <div class="stat">
+      <div class="label">Realised P&L</div>
+      <div class="value" id="stat-realised">—</div>
+      <div class="delta neu" id="stat-realised-r">—</div>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-head"><h2>Open Positions</h2><span class="mono" style="font-size:10px;color:var(--muted)" id="last-scan">—</span></div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Entry</th>
+            <th>SL · TP</th>
+            <th>Mark</th>
+            <th>P&L</th>
+          </tr>
+        </thead>
+        <tbody id="open-body">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Recently Resolved</h2></div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Closed</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Result</th>
+            <th>P&L</th>
+            <th>R</th>
+          </tr>
+        </thead>
+        <tbody id="resolved-body">
+          <tr><td colspan="6" class="empty">Loading…</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  Builds26 Signal Desk · Worker on Render · Storage: Supabase · Paper-trade · 1H candles · Auto-refresh every 30s
+</footer>
+
+<script>
+const SUPABASE_URL = "https://vjxdgvcobltnrktlupmo.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZqeGRndmNvYmx0bnJrdGx1cG1vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgxOTIzNTUsImV4cCI6MjA5Mzc2ODM1NX0.Hnp0jBY3SB-59ryEeueSrvoccyjdbusOb4UKT2S-vA4";
+const BINANCE_BASE = "https://api.binance.com/api/v3";
+
+async function sb(path) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      "apikey": SUPABASE_ANON,
+      "Authorization": `Bearer ${SUPABASE_ANON}`,
+    },
+  });
+  if (!r.ok) throw new Error(`Supabase ${path}: ${r.status}`);
+  return r.json();
+}
+async function fetchPrice(symbol) {
+  const r = await fetch(`${BINANCE_BASE}/ticker/price?symbol=${symbol}`);
+  if (!r.ok) throw new Error(`price ${symbol}`);
+  const j = await r.json();
+  return parseFloat(j.price);
+}
+
+function fmt(n) {
+  if (n == null || isNaN(n)) return "—";
+  n = Number(n);
+  if (n >= 1000) return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (n >= 1) return n.toFixed(2);
+  if (n >= 0.01) return n.toFixed(4);
+  return n.toFixed(6);
+}
+function fmtPct(n) { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
+function fmtTime(t) {
+  if (!t) return "—";
+  return new Date(t).toLocaleString("en-GB", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" });
+}
+function setStatus(text, kind) {
+  document.getElementById("status-text").textContent = text;
+  const dot = document.getElementById("status-dot");
+  dot.style.background = kind === "ok" ? "var(--accent)" : kind === "warn" ? "var(--warn)" : kind === "err" ? "var(--short)" : "var(--muted)";
+}
+function showErr(msg) {
+  const el = document.getElementById("err");
+  el.textContent = msg;
+  el.style.display = "block";
+}
+
+async function refresh() {
+  try {
+    const [accountRows, positions, trades] = await Promise.all([
+      sb("account?select=*"),
+      sb("positions?select=*&order=opened_at.desc"),
+      sb("trades?select=*&order=closed_at.desc&limit=50"),
+    ]);
+    document.getElementById("err").style.display = "none";
+
+    const account = accountRows[0] || { starting_balance: 1000, realised_pnl: 0 };
+    const startBal = Number(account.starting_balance);
+    const realised = Number(account.realised_pnl);
+    const equity = startBal + realised;
+    const pct = ((equity - startBal) / startBal) * 100;
+
+    document.getElementById("stat-equity").textContent = "$" + equity.toFixed(2);
+    const ed = document.getElementById("stat-equity-delta");
+    ed.textContent = fmtPct(pct);
+    ed.className = "delta " + (pct > 0 ? "pos" : pct < 0 ? "neg" : "neu");
+
+    const rEl = document.getElementById("stat-realised");
+    rEl.textContent = (realised >= 0 ? "+" : "") + "$" + realised.toFixed(2);
+    rEl.className = "value " + (realised > 0 ? "pos" : realised < 0 ? "neg" : "");
+
+    const totalR = trades.reduce((a, t) => a + Number(t.r), 0);
+    document.getElementById("stat-realised-r").textContent = (totalR >= 0 ? "+" : "") + totalR.toFixed(2) + "R";
+
+    document.getElementById("stat-open").textContent = positions.length;
+
+    const wins = trades.filter(t => t.result === "win").length;
+    const losses = trades.filter(t => t.result === "loss").length;
+    const bes = trades.filter(t => t.result === "be").length;
+    const total = wins + losses + bes;
+    document.getElementById("stat-resolved").textContent = total;
+    document.getElementById("stat-record").textContent = `${wins}W · ${losses}L · ${bes}BE`;
+
+    if (total > 0) {
+      const wr = (wins / total) * 100;
+      document.getElementById("stat-winrate").textContent = wr.toFixed(0) + "%";
+      const expectancy = totalR / total;
+      const exEl = document.getElementById("stat-expectancy");
+      exEl.textContent = `Expectancy: ${expectancy >= 0 ? "+" : ""}${expectancy.toFixed(2)}R/trade`;
+      exEl.className = "delta " + (expectancy > 0 ? "pos" : expectancy < 0 ? "neg" : "neu");
+    } else {
+      document.getElementById("stat-winrate").textContent = "—";
+      document.getElementById("stat-expectancy").textContent = "Expectancy: —";
+    }
+
+    document.getElementById("last-scan").textContent = "Last scan: " + fmtTime(account.last_scan_at);
+
+    const ob = document.getElementById("open-body");
+    if (positions.length === 0) {
+      ob.innerHTML = '<tr><td colspan="6" class="empty">No open positions — worker waiting for setup</td></tr>';
+      document.getElementById("stat-open-pnl").textContent = "$0.00 unrealised";
+      document.getElementById("stat-open-pnl").className = "delta neu";
+    } else {
+      ob.innerHTML = positions.map(p => `
+        <tr>
+          <td><strong>${p.symbol.replace("USDT","")}</strong></td>
+          <td><span class="signal-tag ${p.side === "long" ? "signal-long" : "signal-short"}">${p.side.toUpperCase()}</span></td>
+          <td>${fmt(p.entry)}</td>
+          <td><span class="neg">${fmt(p.sl)}</span> · <span class="pos">${fmt(p.tp)}</span></td>
+          <td id="mark-${p.id}">…</td>
+          <td id="pnl-${p.id}">…</td>
+        </tr>
+      `).join("");
+      let totalUnrealised = 0;
+      let pending = positions.length;
+      positions.forEach(async p => {
+        try {
+          const price = await fetchPrice(p.symbol);
+          const dir = p.side === "long" ? 1 : -1;
+          const pnl = (price - Number(p.entry)) * Number(p.qty) * dir;
+          totalUnrealised += pnl;
+          const mEl = document.getElementById(`mark-${p.id}`);
+          const pEl = document.getElementById(`pnl-${p.id}`);
+          if (mEl) mEl.textContent = fmt(price);
+          if (pEl) {
+            pEl.textContent = (pnl >= 0 ? "+" : "") + "$" + pnl.toFixed(2);
+            pEl.className = pnl >= 0 ? "pos" : "neg";
+          }
+        } catch (e) {}
+        pending--;
+        if (pending === 0) {
+          const sp = document.getElementById("stat-open-pnl");
+          sp.textContent = (totalUnrealised >= 0 ? "+" : "") + "$" + totalUnrealised.toFixed(2) + " unrealised";
+          sp.className = "delta " + (totalUnrealised >= 0 ? "pos" : "neg");
+        }
+      });
+    }
+
+    const rb = document.getElementById("resolved-body");
+    if (trades.length === 0) {
+      rb.innerHTML = '<tr><td colspan="6" class="empty">No resolved trades yet — first signals fire when 1H candles align</td></tr>';
+    } else {
+      rb.innerHTML = trades.slice(0, 20).map(t => {
+        const cls = t.result === "win" ? "resolved-win" : t.result === "loss" ? "resolved-loss" : "resolved-be";
+        const tag = t.result === "win" ? "✅ WIN" : t.result === "loss" ? "❌ LOSS" : "⚖️ BE";
+        return `<tr>
+          <td>${fmtTime(t.closed_at)}</td>
+          <td><strong>${t.symbol.replace("USDT","")}</strong></td>
+          <td><span class="signal-tag ${t.side === "long" ? "signal-long" : "signal-short"}">${t.side.toUpperCase()}</span></td>
+          <td class="${cls}">${tag}</td>
+          <td class="${Number(t.pnl) >= 0 ? "pos" : "neg"}">${Number(t.pnl) >= 0 ? "+" : ""}$${Number(t.pnl).toFixed(2)}</td>
+          <td class="${Number(t.r) >= 0 ? "pos" : "neg"}">${Number(t.r) >= 0 ? "+" : ""}${Number(t.r).toFixed(2)}R</td>
+        </tr>`;
+      }).join("");
+    }
+
+    setStatus(account.is_running === false ? "PAUSED" : "LIVE · " + (positions.length ? `${positions.length} open` : "watching"), account.is_running === false ? "warn" : "ok");
+  } catch (e) {
+    setStatus("ERROR", "err");
+    showErr("Cannot reach Supabase — check the URL/anon key in this file. Details: " + e.message);
+  }
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+
+</body>
+</html>
