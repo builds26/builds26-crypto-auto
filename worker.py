@@ -261,4 +261,112 @@ def close_position(pos, exit_price, reason):
     pnl = (exit_price - float(pos["entry"])) * float(pos["qty"]) * direction
     r_mult = pnl / float(pos["risk_usd"])
 
-    if reason == "t​​​​​​​​​​​​​​​​
+    if reason == "tp":
+        result = "win"
+    elif reason == "sl":
+        result = "loss"
+    else:
+        result = "win" if pnl > 0 else ("loss" if pnl < 0 else "be")
+
+    sb.table("trades").insert({
+        "symbol":        pos["symbol"],
+        "side":          pos["side"],
+        "entry":         pos["entry"],
+        "exit":          exit_price,
+        "sl":            pos["sl"],
+        "tp":            pos["tp"],
+        "qty":           pos["qty"],
+        "risk_usd":      pos["risk_usd"],
+        "pnl":           pnl,
+        "r":             r_mult,
+        "result":        result,
+        "close_reason":  reason,
+        "signal_reason": pos.get("signal_reason"),
+        "opened_at":     pos["opened_at"],
+    }).execute()
+
+    sb.table("positions").delete().eq("id", pos["id"]).execute()
+
+    account = get_account()
+    new_realised = float(account["realised_pnl"]) + pnl
+    update_account(realised_pnl=new_realised)
+
+    tag = "✅" if result == "win" else "❌" if result == "loss" else "⚖️"
+    log.info(
+        f"{tag} CLOSE {pos['side'].upper()} {pos['symbol']} @ {exit_price:.4f} · "
+        f"{'+' if pnl >= 0 else ''}${pnl:.2f} ({'+' if r_mult >= 0 else ''}{r_mult:.2f}R) [{reason}]"
+    )
+
+
+def check_open_positions():
+    open_positions = get_open_positions()
+    for pos in open_positions:
+        try:
+            price = fetch_price(pos["symbol"])
+            entry, sl, tp = float(pos["entry"]), float(pos["sl"]), float(pos["tp"])
+            if pos["side"] == "long":
+                if price <= sl:
+                    close_position(pos, sl, "sl")
+                elif price >= tp:
+                    close_position(pos, tp, "tp")
+            else:  # short
+                if price >= sl:
+                    close_position(pos, sl, "sl")
+                elif price <= tp:
+                    close_position(pos, tp, "tp")
+        except Exception as e:
+            log.error(f"price check failed {pos['symbol']}: {e}")
+
+
+# ===========================================================================
+# Main
+# ===========================================================================
+def run():
+    log.info("=" * 60)
+    log.info("Crypto auto worker — paper trade scan")
+    log.info(
+        f"risk={RISK_PCT}% lev={LEVERAGE}x max_concurrent={MAX_CONCURRENT} "
+        f"atr_sl={ATR_SL_MULT} atr_tp={ATR_TP_MULT}"
+    )
+
+    account = get_account()
+    if not account:
+        log.error("No account row found — did you run the SQL setup?")
+        return
+    if not account.get("is_running", True):
+        log.info("Account is_running=false, skipping scan (resume in dashboard/SQL)")
+        return
+
+    log.info(f"Equity: ${equity(account):.2f} (start ${float(account['starting_balance']):.2f}, "
+             f"realised {'+' if float(account['realised_pnl']) >= 0 else ''}${float(account['realised_pnl']):.2f})")
+
+    # 1. Check & close any open positions that hit SL/TP
+    check_open_positions()
+
+    # 2. Refresh account after potential closes
+    account = get_account()
+
+    # 3. Scan all coins for new entries
+    for symbol in COINS:
+        try:
+            candles = fetch_klines(symbol, "1h", 200)
+            a = analyse(candles)
+            if a is None:
+                continue
+            if a["signal"] != "flat":
+                log.info(f"{symbol} → {a['signal'].upper()} ({a['reasons']})")
+                open_position(symbol, a, account)
+                # Refresh account after opening a position so concurrent-limit math stays right
+                account = get_account()
+            else:
+                log.info(f"{symbol} flat (RSI {a['rsi']:.0f}, trend {a['trend']})")
+        except Exception as e:
+            log.error(f"scan {symbol} failed: {e}")
+        time.sleep(0.15)  # be gentle on Binance
+
+    update_account(last_scan_at=datetime.now(timezone.utc).isoformat())
+    log.info("Scan complete")
+
+
+if __name__ == "__main__":
+    run()
