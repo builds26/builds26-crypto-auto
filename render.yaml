@@ -1,0 +1,23 @@
+services:
+  - type: cron
+    name: crypto-auto-worker
+    runtime: python
+    plan: starter
+    schedule: "*/15 * * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python worker.py"
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: RISK_PCT
+        value: "1.0"
+      - key: LEVERAGE
+        value: "10"
+      - key: MAX_CONCURRENT
+        value: "3"
+      - key: ATR_SL_MULT
+        value: "1.5"
+      - key: ATR_TP_MULT
+        value: "3.0"
