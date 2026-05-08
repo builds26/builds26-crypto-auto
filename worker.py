@@ -1,9 +1,13 @@
 """
-Builds26 Crypto Auto — Paper Trade Worker
-==========================================
-Runs on Render cron every 15min. Scans Binance 1H candles for the configured
-coin list, applies the EMA20/50 + RSI14 + MACD + ATR + volume strategy, opens
-paper positions in Supabase, and closes any positions that hit SL/TP.
+Builds26 Crypto Auto — Paper Trade Worker (v2)
+================================================
+Runs on Render cron every 15 min. Scans Binance USDT-M Futures 1H candles
+for the configured coin list, applies the strategy, and OPENS paper positions
+in Supabase.
+
+Position monitoring (SL/TP checks) is handled by watcher.py — a separate
+long-running Render Background Worker that streams live prices via WebSocket
+and closes positions within ~1 second of the actual SL/TP touch.
 
 This is paper trading. No exchange API calls. No real money.
 """
@@ -12,7 +16,6 @@ import os
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 import requests
 from supabase import create_client, Client
@@ -26,14 +29,14 @@ COINS = [
     "LINKUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT",
 ]
 
-# Risk / sizing — read from env so Render env vars can override without redeploy
 RISK_PCT       = float(os.getenv("RISK_PCT",       "1.0"))
 LEVERAGE       = float(os.getenv("LEVERAGE",       "10"))
 MAX_CONCURRENT = int(float(os.getenv("MAX_CONCURRENT", "3")))
 ATR_SL_MULT    = float(os.getenv("ATR_SL_MULT",    "1.5"))
 ATR_TP_MULT    = float(os.getenv("ATR_TP_MULT",    "3.0"))
 
-BINANCE_BASE = "https://api.binance.com/api/v3"
+# Binance USDT-M Futures — same paths as Spot but different host
+FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 
 # ---------- Logging ----------
 logging.basicConfig(
@@ -117,11 +120,11 @@ def avg_volume(candles, n=20):
 
 
 # ===========================================================================
-# Data
+# Data — Binance USDT-M Futures public endpoints
 # ===========================================================================
 def fetch_klines(symbol, interval="1h", limit=200):
     r = requests.get(
-        f"{BINANCE_BASE}/klines",
+        f"{FUTURES_BASE}/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
         timeout=10,
     )
@@ -139,14 +142,20 @@ def fetch_klines(symbol, interval="1h", limit=200):
     ]
 
 
-def fetch_price(symbol):
-    r = requests.get(
-        f"{BINANCE_BASE}/ticker/price",
-        params={"symbol": symbol},
-        timeout=10,
-    )
-    r.raise_for_status()
-    return float(r.json()["price"])
+def fetch_funding_rate(symbol):
+    """Most recent funding rate (8h cycle on Binance Futures)."""
+    try:
+        r = requests.get(
+            f"{FUTURES_BASE}/premiumIndex",
+            params={"symbol": symbol},
+            timeout=10,
+        )
+        r.raise_for_status()
+        j = r.json()
+        return float(j.get("lastFundingRate", 0))
+    except Exception as e:
+        log.warning(f"funding rate {symbol}: {e}")
+        return 0.0
 
 
 # ===========================================================================
@@ -259,75 +268,12 @@ def open_position(symbol, a, account):
     notify.notify_open(symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"])
 
 
-def close_position(pos, exit_price, reason):
-    direction = 1 if pos["side"] == "long" else -1
-    pnl = (exit_price - float(pos["entry"])) * float(pos["qty"]) * direction
-    r_mult = pnl / float(pos["risk_usd"])
-
-    if reason == "tp":
-        result = "win"
-    elif reason == "sl":
-        result = "loss"
-    else:
-        result = "win" if pnl > 0 else ("loss" if pnl < 0 else "be")
-
-    sb.table("trades").insert({
-        "symbol":        pos["symbol"],
-        "side":          pos["side"],
-        "entry":         pos["entry"],
-        "exit":          exit_price,
-        "sl":            pos["sl"],
-        "tp":            pos["tp"],
-        "qty":           pos["qty"],
-        "risk_usd":      pos["risk_usd"],
-        "pnl":           pnl,
-        "r":             r_mult,
-        "result":        result,
-        "close_reason":  reason,
-        "signal_reason": pos.get("signal_reason"),
-        "opened_at":     pos["opened_at"],
-    }).execute()
-
-    sb.table("positions").delete().eq("id", pos["id"]).execute()
-
-    account = get_account()
-    new_realised = float(account["realised_pnl"]) + pnl
-    update_account(realised_pnl=new_realised)
-
-    tag = "✅" if result == "win" else "❌" if result == "loss" else "⚖️"
-    log.info(
-        f"{tag} CLOSE {pos['side'].upper()} {pos['symbol']} @ {exit_price:.4f} · "
-        f"{'+' if pnl >= 0 else ''}${pnl:.2f} ({'+' if r_mult >= 0 else ''}{r_mult:.2f}R) [{reason}]"
-    )
-    notify.notify_close(pos["symbol"], pos["side"], pos["entry"], exit_price, pnl, r_mult, result, reason)
-
-
-def check_open_positions():
-    open_positions = get_open_positions()
-    for pos in open_positions:
-        try:
-            price = fetch_price(pos["symbol"])
-            entry, sl, tp = float(pos["entry"]), float(pos["sl"]), float(pos["tp"])
-            if pos["side"] == "long":
-                if price <= sl:
-                    close_position(pos, sl, "sl")
-                elif price >= tp:
-                    close_position(pos, tp, "tp")
-            else:  # short
-                if price >= sl:
-                    close_position(pos, sl, "sl")
-                elif price <= tp:
-                    close_position(pos, tp, "tp")
-        except Exception as e:
-            log.error(f"price check failed {pos['symbol']}: {e}")
-
-
 # ===========================================================================
 # Main
 # ===========================================================================
 def run():
     log.info("=" * 60)
-    log.info("Crypto auto worker — paper trade scan")
+    log.info("Crypto auto worker (v2) — paper trade scan · Binance Futures")
     log.info(
         f"risk={RISK_PCT}% lev={LEVERAGE}x max_concurrent={MAX_CONCURRENT} "
         f"atr_sl={ATR_SL_MULT} atr_tp={ATR_TP_MULT}"
@@ -338,35 +284,40 @@ def run():
         log.error("No account row found — did you run the SQL setup?")
         return
     if not account.get("is_running", True):
-        log.info("Account is_running=false, skipping scan (resume in dashboard/SQL)")
+        log.info("Account is_running=false, skipping scan")
         return
 
     log.info(f"Equity: ${equity(account):.2f} (start ${float(account['starting_balance']):.2f}, "
              f"realised {'+' if float(account['realised_pnl']) >= 0 else ''}${float(account['realised_pnl']):.2f})")
 
-    # 1. Check & close any open positions that hit SL/TP
-    check_open_positions()
+    # NOTE: Position monitoring (SL/TP closes) is now handled by watcher.py
+    # Worker only opens new positions; it never closes them.
 
-    # 2. Refresh account after potential closes
-    account = get_account()
-
-    # 3. Scan all coins for new entries
     for symbol in COINS:
         try:
             candles = fetch_klines(symbol, "1h", 200)
             a = analyse(candles)
             if a is None:
                 continue
+
+            funding = fetch_funding_rate(symbol)
+            funding_pct = funding * 100
+
             if a["signal"] != "flat":
-                log.info(f"{symbol} → {a['signal'].upper()} ({a['reasons']})")
+                log.info(
+                    f"{symbol} → {a['signal'].upper()} ({a['reasons']}) · "
+                    f"funding {funding_pct:+.4f}%/8h"
+                )
                 open_position(symbol, a, account)
-                # Refresh account after opening a position so concurrent-limit math stays right
                 account = get_account()
             else:
-                log.info(f"{symbol} flat (RSI {a['rsi']:.0f}, trend {a['trend']})")
+                log.info(
+                    f"{symbol} flat (RSI {a['rsi']:.0f}, trend {a['trend']}, "
+                    f"funding {funding_pct:+.4f}%/8h)"
+                )
         except Exception as e:
             log.error(f"scan {symbol} failed: {e}")
-        time.sleep(0.15)  # be gentle on Binance
+        time.sleep(0.15)
 
     update_account(last_scan_at=datetime.now(timezone.utc).isoformat())
     log.info("Scan complete")
