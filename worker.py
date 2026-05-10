@@ -1,6 +1,16 @@
-“””
-Builds26 Crypto Auto - Paper Trade Worker (v3)
-“””
+"""
+Builds26 Crypto Auto — Paper Trade Worker (v2)
+================================================
+Runs on Render cron every 15 min. Scans Binance USDT-M Futures 1H candles
+for the configured coin list, applies the strategy, and OPENS paper positions
+in Supabase.
+
+Position monitoring (SL/TP checks) is handled by watcher.py — a separate
+long-running Render Background Worker that streams live prices via WebSocket
+and closes positions within ~1 second of the actual SL/TP touch.
+
+This is paper trading. No exchange API calls. No real money.
+"""
 
 import os
 import time
@@ -12,387 +22,306 @@ from supabase import create_client, Client
 
 import notify
 
-# ––––– Config –––––
-
+# ---------- Config ----------
 COINS = [
-“BTCUSDT”, “ETHUSDT”, “SOLUSDT”, “BNBUSDT”,
-“XRPUSDT”, “ADAUSDT”, “AVAXUSDT”, “DOGEUSDT”,
-“LINKUSDT”, “MATICUSDT”, “DOTUSDT”, “LTCUSDT”,
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+    "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT",
+    "LINKUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT",
 ]
 
-RISK_PCT = float(os.getenv(“RISK_PCT”, “1.0”))
-LEVERAGE = float(os.getenv(“LEVERAGE”, “10”))
-MAX_CONCURRENT = int(float(os.getenv(“MAX_CONCURRENT”, “3”)))
-ATR_SL_MULT = float(os.getenv(“ATR_SL_MULT”, “1.5”))
-ATR_TP_MULT = float(os.getenv(“ATR_TP_MULT”, “3.0”))
+RISK_PCT       = float(os.getenv("RISK_PCT",       "1.0"))
+LEVERAGE       = float(os.getenv("LEVERAGE",       "10"))
+MAX_CONCURRENT = int(float(os.getenv("MAX_CONCURRENT", "3")))
+ATR_SL_MULT    = float(os.getenv("ATR_SL_MULT",    "1.5"))
+ATR_TP_MULT    = float(os.getenv("ATR_TP_MULT",    "3.0"))
 
-FUNDING_LONG_MAX = float(os.getenv(“FUNDING_LONG_MAX”, “0.0005”))
-FUNDING_SHORT_MIN = float(os.getenv(“FUNDING_SHORT_MIN”, “-0.0005”))
-DAILY_LOSS_LIMIT_PCT = float(os.getenv(“DAILY_LOSS_LIMIT_PCT”, “3.0”))
+# Binance USDT-M Futures — same paths as Spot but different host
+FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 
-FUTURES_BASE = “https://fapi.binance.com/fapi/v1”
-
-# ––––– Logging –––––
-
+# ---------- Logging ----------
 logging.basicConfig(
-level=logging.INFO,
-format=”%(asctime)s [%(levelname)s] %(message)s”,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger(“worker”)
+log = logging.getLogger("worker")
 
-# ––––– Supabase –––––
-
-SUPABASE_URL = os.environ[“SUPABASE_URL”]
-SUPABASE_KEY = os.environ[“SUPABASE_SERVICE_KEY”]
+# ---------- Supabase ----------
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ===========================================================================
 
+# ===========================================================================
 # Indicators
-
 # ===========================================================================
-
 def ema(values, period):
-k = 2 / (period + 1)
-out = [values[0]]
-for v in values[1:]:
-out.append(v * k + out[-1] * (1 - k))
-return out
+    k = 2 / (period + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
 
 def rsi(closes, period=14):
-if len(closes) < period + 1:
-return None
-gains = losses = 0.0
-for i in range(1, period + 1):
-d = closes[i] - closes[i - 1]
-if d > 0:
-gains += d
-else:
-losses -= d
-avg_g, avg_l = gains / period, losses / period
-for i in range(period + 1, len(closes)):
-d = closes[i] - closes[i - 1]
-avg_g = (avg_g * (period - 1) + max(d, 0)) / period
-avg_l = (avg_l * (period - 1) + max(-d, 0)) / period
-if avg_l == 0:
-return 100.0
-rs = avg_g / avg_l
-return 100 - 100 / (1 + rs)
+    if len(closes) < period + 1:
+        return None
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        if d > 0:
+            gains += d
+        else:
+            losses -= d
+    avg_g, avg_l = gains / period, losses / period
+    for i in range(period + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        avg_g = (avg_g * (period - 1) + max(d, 0)) / period
+        avg_l = (avg_l * (period - 1) + max(-d, 0)) / period
+    if avg_l == 0:
+        return 100.0
+    rs = avg_g / avg_l
+    return 100 - 100 / (1 + rs)
+
 
 def macd(closes):
-if len(closes) < 35:
-return None
-e12 = ema(closes, 12)
-e26 = ema(closes, 26)
-macd_line = [a - b for a, b in zip(e12, e26)]
-sig = ema(macd_line, 9)
-return {
-“macd”: macd_line[-1],
-“signal”: sig[-1],
-“hist”: macd_line[-1] - sig[-1],
-“bull_cross”: macd_line[-2] <= sig[-2] and macd_line[-1] > sig[-1],
-“bear_cross”: macd_line[-2] >= sig[-2] and macd_line[-1] < sig[-1],
-“above”: macd_line[-1] > sig[-1],
-}
+    if len(closes) < 35:
+        return None
+    e12 = ema(closes, 12)
+    e26 = ema(closes, 26)
+    macd_line = [a - b for a, b in zip(e12, e26)]
+    sig = ema(macd_line[-200:], 9)
+    return {
+        "macd":      macd_line[-1],
+        "signal":    sig[-1],
+        "hist":      macd_line[-1] - sig[-1],
+        "bull_cross": macd_line[-2] <= sig[-2] and macd_line[-1] > sig[-1],
+        "bear_cross": macd_line[-2] >= sig[-2] and macd_line[-1] < sig[-1],
+        "above":      macd_line[-1] > sig[-1],
+    }
+
 
 def atr(candles, period=14):
-if len(candles) < period + 1:
-return None
-trs = []
-for i in range(1, len(candles)):
-h, l = candles[i][“high”], candles[i][“low”]
-pc = candles[i - 1][“close”]
-trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-a = sum(trs[:period]) / period
-for i in range(period, len(trs)):
-a = (a * (period - 1) + trs[i]) / period
-return a
+    if len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(1, len(candles)):
+        h, l = candles[i]["high"], candles[i]["low"]
+        pc = candles[i - 1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    a = sum(trs[:period]) / period
+    for i in range(period, len(trs)):
+        a = (a * (period - 1) + trs[i]) / period
+    return a
+
 
 def avg_volume(candles, n=20):
-vols = [c[“volume”] for c in candles[-n:]]
-return sum(vols) / len(vols)
+    vols = [c["volume"] for c in candles[-n:]]
+    return sum(vols) / len(vols)
+
 
 # ===========================================================================
-
-# Data
-
+# Data — Binance USDT-M Futures public endpoints
 # ===========================================================================
+def fetch_klines(symbol, interval="1h", limit=200):
+    r = requests.get(
+        f"{FUTURES_BASE}/klines",
+        params={"symbol": symbol, "interval": interval, "limit": limit},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return [
+        {
+            "time":   k[0],
+            "open":   float(k[1]),
+            "high":   float(k[2]),
+            "low":    float(k[3]),
+            "close":  float(k[4]),
+            "volume": float(k[5]),
+        }
+        for k in r.json()
+    ]
 
-def fetch_klines(symbol, interval=“1h”, limit=200):
-r = requests.get(
-f”{FUTURES_BASE}/klines”,
-params={“symbol”: symbol, “interval”: interval, “limit”: limit},
-timeout=10,
-)
-r.raise_for_status()
-return [
-{
-“time”: k[0],
-“open”: float(k[1]),
-“high”: float(k[2]),
-“low”: float(k[3]),
-“close”: float(k[4]),
-“volume”: float(k[5]),
-}
-for k in r.json()
-]
 
 def fetch_funding_rate(symbol):
-try:
-r = requests.get(
-f”{FUTURES_BASE}/premiumIndex”,
-params={“symbol”: symbol},
-timeout=10,
-)
-r.raise_for_status()
-j = r.json()
-return float(j.get(“lastFundingRate”, 0))
-except Exception as e:
-log.warning(f”funding rate {symbol}: {e}”)
-return 0.0
+    """Most recent funding rate (8h cycle on Binance Futures)."""
+    try:
+        r = requests.get(
+            f"{FUTURES_BASE}/premiumIndex",
+            params={"symbol": symbol},
+            timeout=10,
+        )
+        r.raise_for_status()
+        j = r.json()
+        return float(j.get("lastFundingRate", 0))
+    except Exception as e:
+        log.warning(f"funding rate {symbol}: {e}")
+        return 0.0
+
 
 # ===========================================================================
-
 # Strategy
-
 # ===========================================================================
-
 def analyse(candles):
-if len(candles) < 60:
-return None
+    closes = [c["close"] for c in candles]
+    last = candles[-1]
+    e20 = ema(closes, 20)[-1]
+    e50 = ema(closes, 50)[-1]
+    rsi_now = rsi(closes, 14)
+    m = macd(closes)
+    atr_now = atr(candles, 14)
+    vol_ratio = last["volume"] / avg_volume(candles, 20)
 
-```
-closes = [c["close"] for c in candles]
+    if rsi_now is None or m is None or atr_now is None:
+        return None
 
-last_closed = candles[-2]
-closes_closed = closes[:-1]
+    trend = "up" if e20 > e50 else "down"
+    signal = "flat"
+    reasons = []
 
-e20 = ema(closes_closed, 20)[-1]
-e50 = ema(closes_closed, 50)[-1]
-rsi_now = rsi(closes_closed, 14)
-m = macd(closes_closed)
-atr_now = atr(candles[:-1], 14)
-vol_ratio = last_closed["volume"] / avg_volume(candles[:-1], 20)
+    if (
+        trend == "up"
+        and 40 <= rsi_now <= 70
+        and (m["bull_cross"] or m["hist"] > 0)
+        and vol_ratio > 1.2
+        and last["close"] > e20
+    ):
+        signal = "long"
+        reasons.append("MACD bull cross" if m["bull_cross"] else "MACD bullish")
+        reasons.append(f"RSI {rsi_now:.0f}")
+        reasons.append(f"vol {vol_ratio:.1f}x")
+    elif (
+        trend == "down"
+        and 30 <= rsi_now <= 60
+        and (m["bear_cross"] or m["hist"] < 0)
+        and vol_ratio > 1.2
+        and last["close"] < e20
+    ):
+        signal = "short"
+        reasons.append("MACD bear cross" if m["bear_cross"] else "MACD bearish")
+        reasons.append(f"RSI {rsi_now:.0f}")
+        reasons.append(f"vol {vol_ratio:.1f}x")
 
-if rsi_now is None or m is None or atr_now is None:
-    return None
+    return {
+        "price":   last["close"],
+        "rsi":     rsi_now,
+        "atr":     atr_now,
+        "trend":   trend,
+        "signal":  signal,
+        "reasons": " · ".join(reasons),
+    }
 
-trend = "up" if e20 > e50 else "down"
-signal = "flat"
-reasons = []
-
-if (
-    trend == "up"
-    and 40 <= rsi_now <= 70
-    and (m["bull_cross"] or m["hist"] > 0)
-    and vol_ratio > 1.2
-    and last_closed["close"] > e20
-):
-    signal = "long"
-    reasons.append("MACD bull cross" if m["bull_cross"] else "MACD bullish")
-    reasons.append(f"RSI {rsi_now:.0f}")
-    reasons.append(f"vol {vol_ratio:.1f}x")
-elif (
-    trend == "down"
-    and 30 <= rsi_now <= 60
-    and (m["bear_cross"] or m["hist"] < 0)
-    and vol_ratio > 1.2
-    and last_closed["close"] < e20
-):
-    signal = "short"
-    reasons.append("MACD bear cross" if m["bear_cross"] else "MACD bearish")
-    reasons.append(f"RSI {rsi_now:.0f}")
-    reasons.append(f"vol {vol_ratio:.1f}x")
-
-return {
-    "price": last_closed["close"],
-    "rsi": rsi_now,
-    "atr": atr_now,
-    "trend": trend,
-    "signal": signal,
-    "reasons": " . ".join(reasons),
-}
-```
 
 # ===========================================================================
-
 # Account / Positions
-
 # ===========================================================================
-
 def get_account():
-res = sb.table(“account”).select(”*”).eq(“id”, 1).execute()
-return res.data[0] if res.data else None
+    res = sb.table("account").select("*").eq("id", 1).execute()
+    return res.data[0] if res.data else None
+
 
 def update_account(**fields):
-sb.table(“account”).update(fields).eq(“id”, 1).execute()
+    sb.table("account").update(fields).eq("id", 1).execute()
+
 
 def equity(account):
-return float(account[“starting_balance”]) + float(account[“realised_pnl”])
+    return float(account["starting_balance"]) + float(account["realised_pnl"])
+
 
 def get_open_positions():
-res = sb.table(“positions”).select(”*”).execute()
-return res.data or []
+    res = sb.table("positions").select("*").execute()
+    return res.data or []
 
-def check_and_update_daily_state(account):
-today_utc = datetime.now(timezone.utc).date().isoformat()
-day_start_date = account.get(“day_start_date”)
-new_day = day_start_date != today_utc
 
-```
-if new_day:
+def open_position(symbol, a, account):
+    open_positions = get_open_positions()
+    if len(open_positions) >= MAX_CONCURRENT:
+        log.info(f"skip {symbol}: at max concurrent ({MAX_CONCURRENT})")
+        return
+    if any(p["symbol"] == symbol for p in open_positions):
+        log.info(f"skip {symbol}: already open")
+        return
+
     eq = equity(account)
-    update_account(
-        day_start_equity=eq,
-        day_start_date=today_utc,
-        daily_pause_active=False,
-    )
-    log.info(f"new UTC day - day_start_equity=${eq:.2f} - daily pause cleared")
-    return get_account(), True
+    risk_usd = eq * (RISK_PCT / 100)
+    sl_dist = a["atr"] * ATR_SL_MULT
+    tp_dist = a["atr"] * ATR_TP_MULT
+    entry = a["price"]
+    sl = entry - sl_dist if a["signal"] == "long" else entry + sl_dist
+    tp = entry + tp_dist if a["signal"] == "long" else entry - tp_dist
+    qty = risk_usd / sl_dist
 
-return account, False
-```
+    sb.table("positions").insert({
+        "symbol":        symbol,
+        "side":          a["signal"],
+        "entry":         entry,
+        "sl":            sl,
+        "tp":            tp,
+        "qty":           qty,
+        "risk_usd":      risk_usd,
+        "signal_reason": a["reasons"],
+    }).execute()
 
-def daily_loss_breached(account):
-day_start = account.get(“day_start_equity”)
-if day_start is None or float(day_start) <= 0:
-return False
-eq = equity(account)
-drawdown_pct = (float(day_start) - eq) / float(day_start) * 100
-return drawdown_pct >= DAILY_LOSS_LIMIT_PCT
-
-def open_position(symbol, a, account, funding):
-open_positions = get_open_positions()
-if len(open_positions) >= MAX_CONCURRENT:
-log.info(f”skip {symbol}: at max concurrent ({MAX_CONCURRENT})”)
-return
-if any(p[“symbol”] == symbol for p in open_positions):
-log.info(f”skip {symbol}: already open”)
-return
-
-```
-if a["signal"] == "long" and funding > FUNDING_LONG_MAX:
     log.info(
-        f"skip {symbol} LONG: funding {funding * 100:+.4f}%/8h > "
-        f"{FUNDING_LONG_MAX * 100:+.4f}% limit"
+        f"OPEN {a['signal'].upper()} {symbol} @ {entry:.4f} · "
+        f"SL {sl:.4f} · TP {tp:.4f} · risk ${risk_usd:.2f} · {a['reasons']}"
     )
-    return
-if a["signal"] == "short" and funding < FUNDING_SHORT_MIN:
-    log.info(
-        f"skip {symbol} SHORT: funding {funding * 100:+.4f}%/8h < "
-        f"{FUNDING_SHORT_MIN * 100:+.4f}% limit"
-    )
-    return
+    notify.notify_open(symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"])
 
-eq = equity(account)
-risk_usd = eq * (RISK_PCT / 100)
-sl_dist = a["atr"] * ATR_SL_MULT
-tp_dist = a["atr"] * ATR_TP_MULT
-
-entry = a["price"]
-sl = entry - sl_dist if a["signal"] == "long" else entry + sl_dist
-tp = entry + tp_dist if a["signal"] == "long" else entry - tp_dist
-qty = risk_usd / sl_dist
-
-sb.table("positions").insert({
-    "symbol": symbol,
-    "side": a["signal"],
-    "entry": entry,
-    "sl": sl,
-    "tp": tp,
-    "qty": qty,
-    "risk_usd": risk_usd,
-    "signal_reason": a["reasons"],
-}).execute()
-
-log.info(
-    f"OPEN {a['signal'].upper()} {symbol} @ {entry:.4f} - "
-    f"SL {sl:.4f} - TP {tp:.4f} - risk ${risk_usd:.2f} - "
-    f"funding {funding * 100:+.4f}%/8h - {a['reasons']}"
-)
-notify.notify_open(symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"])
-```
 
 # ===========================================================================
-
 # Main
-
 # ===========================================================================
-
 def run():
-log.info(”=” * 60)
-log.info(“Crypto auto worker (v3) - paper trade scan”)
-log.info(
-f”risk={RISK_PCT}% lev={LEVERAGE}x max_concurrent={MAX_CONCURRENT} “
-f”atr_sl={ATR_SL_MULT} atr_tp={ATR_TP_MULT} “
-f”funding_long_max={FUNDING_LONG_MAX * 100:+.3f}% “
-f”funding_short_min={FUNDING_SHORT_MIN * 100:+.3f}% “
-f”daily_loss_limit={DAILY_LOSS_LIMIT_PCT}%”
-)
+    log.info("=" * 60)
+    log.info("Crypto auto worker (v2) — paper trade scan · Binance Futures")
+    log.info(
+        f"risk={RISK_PCT}% lev={LEVERAGE}x max_concurrent={MAX_CONCURRENT} "
+        f"atr_sl={ATR_SL_MULT} atr_tp={ATR_TP_MULT}"
+    )
 
-```
-account = get_account()
-if not account:
-    log.error("No account row found - did you run the SQL setup?")
-    return
+    account = get_account()
+    if not account:
+        log.error("No account row found — did you run the SQL setup?")
+        return
+    if not account.get("is_running", True):
+        log.info("Account is_running=false, skipping scan")
+        return
 
-if not account.get("is_running", True):
-    log.info("Account is_running=false, skipping scan")
-    return
+    log.info(f"Equity: ${equity(account):.2f} (start ${float(account['starting_balance']):.2f}, "
+             f"realised {'+' if float(account['realised_pnl']) >= 0 else ''}${float(account['realised_pnl']):.2f})")
 
-account, _new_day = check_and_update_daily_state(account)
+    # NOTE: Position monitoring (SL/TP closes) is now handled by watcher.py
+    # Worker only opens new positions; it never closes them.
 
-eq = equity(account)
-log.info(
-    f"Equity: ${eq:.2f} (start ${float(account['starting_balance']):.2f}, "
-    f"realised {'+' if float(account['realised_pnl']) >= 0 else ''}"
-    f"${float(account['realised_pnl']):.2f})"
-)
+    for symbol in COINS:
+        try:
+            candles = fetch_klines(symbol, "1h", 200)
+            a = analyse(candles)
+            if a is None:
+                continue
 
-if daily_loss_breached(account):
-    if not account.get("daily_pause_active"):
-        update_account(daily_pause_active=True)
-        log.warning(
-            f"DAILY LOSS LIMIT HIT - equity ${eq:.2f} is "
-            f">{DAILY_LOSS_LIMIT_PCT}% below day start "
-            f"${float(account['day_start_equity']):.2f}. "
-            f"Pausing new entries until next UTC day."
-        )
-    else:
-        log.info("daily pause active - skipping entries")
+            funding = fetch_funding_rate(symbol)
+            funding_pct = funding * 100
+
+            if a["signal"] != "flat":
+                log.info(
+                    f"{symbol} → {a['signal'].upper()} ({a['reasons']}) · "
+                    f"funding {funding_pct:+.4f}%/8h"
+                )
+                open_position(symbol, a, account)
+                account = get_account()
+            else:
+                log.info(
+                    f"{symbol} flat (RSI {a['rsi']:.0f}, trend {a['trend']}, "
+                    f"funding {funding_pct:+.4f}%/8h)"
+                )
+        except Exception as e:
+            log.error(f"scan {symbol} failed: {e}")
+        time.sleep(0.15)
+
     update_account(last_scan_at=datetime.now(timezone.utc).isoformat())
-    return
+    log.info("Scan complete")
 
-for symbol in COINS:
-    try:
-        candles = fetch_klines(symbol, "1h", 200)
-        a = analyse(candles)
-        if a is None:
-            continue
 
-        funding = fetch_funding_rate(symbol)
-        funding_pct = funding * 100
-
-        if a["signal"] != "flat":
-            log.info(
-                f"{symbol} -> {a['signal'].upper()} ({a['reasons']}) - "
-                f"funding {funding_pct:+.4f}%/8h"
-            )
-            open_position(symbol, a, account, funding)
-            account = get_account()
-        else:
-            log.info(
-                f"{symbol} flat (RSI {a['rsi']:.0f}, trend {a['trend']}, "
-                f"funding {funding_pct:+.4f}%/8h)"
-            )
-    except Exception as e:
-        log.error(f"scan {symbol} failed: {e}")
-
-    time.sleep(0.15)
-
-update_account(last_scan_at=datetime.now(timezone.utc).isoformat())
-log.info("Scan complete")
-```
-
-if **name** == “**main**”:
-run()
+if __name__ == "__main__":
+    run()
