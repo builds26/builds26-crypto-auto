@@ -2,17 +2,17 @@
 Builds26 Crypto Auto - Position Watcher (v3.0)
 
 Long-running process that polls Binance Futures REST API for mark prices
-of open paper positions. The moment any open position’s mark price crosses
+of open paper positions. The moment any open position mark price crosses
 its SL or TP, the watcher closes it in Supabase and fires a Telegram alert
 
 - within ~3 seconds of the actual touch.
 
 v3.0 replaces the WebSocket-based monitoring of v2.x. Binance Futures WSS
-endpoints (fstream.binance.com) silently drop traffic from Render’s
-outbound IP range: TCP/WS handshake completes, but no market data is
-delivered. v2.x looked healthy in logs (subscriptions sent, acks received)
-but on_message was never triggered, so positions never closed even when
-mark price clearly crossed SL/TP.
+endpoints (fstream.binance.com) silently drop traffic from Render outbound
+IP range: TCP/WS handshake completes, but no market data is delivered.
+v2.x looked healthy in logs (subscriptions sent, acks received) but
+on_message was never triggered, so positions never closed even when mark
+price clearly crossed SL/TP.
 
 Fix: poll https://fapi.binance.com/fapi/v1/premiumIndex every POLL_INTERVAL
 seconds. One request returns mark prices for ALL futures symbols. Standard
@@ -55,7 +55,7 @@ BINANCE_PREMIUM_INDEX = “https://fapi.binance.com/fapi/v1/premiumIndex”
 
 # Polling cadence. 3s gives sub-candle responsiveness while staying well
 
-# inside Binance’s rate limits (premiumIndex with no symbol is weight 10,
+# inside Binance rate limits (premiumIndex with no symbol is weight 10,
 
 # limit 2400/min - so 3s = 200 calls/min = weight 2000/min, safe).
 
@@ -69,28 +69,26 @@ RESYNC_INTERVAL = 30
 
 # How many consecutive HTTP failures before we log loudly. Transient
 
-# network blips happen; we don’t want to spam Telegram or logs over a
+# network blips happen; we do not want to spam Telegram or logs over a
 
 # single 500.
 
 ERROR_LOG_THRESHOLD = 3
 
 def get_open_positions():
-“”“Fetch all currently-open paper positions from Supabase.”””
+# Fetch all currently-open paper positions from Supabase.
 res = sb.table(“positions”).select(”*”).execute()
 return res.data or []
 
 def get_account():
-“”“Fetch the single account row (id=1).”””
+# Fetch the single account row (id=1).
 res = sb.table(“account”).select(”*”).eq(“id”, 1).execute()
 return res.data[0] if res.data else None
 
 def fetch_mark_prices():
-“””
-Fetch mark prices for all Binance Futures symbols in one request.
-Returns dict mapping symbol (e.g. ‘ADAUSDT’) -> mark price (float).
-Returns None on failure.
-“””
+# Fetch mark prices for all Binance Futures symbols in one request.
+# Returns dict mapping symbol (e.g. ADAUSDT) to mark price (float).
+# Returns None on failure.
 try:
 r = requests.get(BINANCE_PREMIUM_INDEX, timeout=10)
 r.raise_for_status()
@@ -104,10 +102,8 @@ log.error(f”fetch_mark_prices: parse error: {e}”)
 return None
 
 def close_position(pos, exit_price, reason):
-“””
-Close a position: insert a trade row, delete the position row, update
-realised PnL on the account, log the close, and send a Telegram alert.
-“””
+# Close a position: insert a trade row, delete the position row, update
+# realised PnL on the account, log the close, and send a Telegram alert.
 direction = 1 if pos[“side”] == “long” else -1
 pnl = (exit_price - float(pos[“entry”])) * float(pos[“qty”]) * direction
 r_mult = pnl / float(pos[“risk_usd”])
@@ -144,9 +140,13 @@ new_realised = float(account["realised_pnl"]) + pnl
 sb.table("account").update({"realised_pnl": new_realised}).eq("id", 1).execute()
 
 tag = "OK" if result == "win" else "LOSS" if result == "loss" else "BE"
+side_upper = pos["side"].upper()
+sym = pos["symbol"]
+pnl_sign = "+" if pnl >= 0 else ""
+r_sign = "+" if r_mult >= 0 else ""
 log.info(
-    f"[{tag}] CLOSE {pos['side'].upper()} {pos['symbol']} @ {exit_price:.6f} | "
-    f"{'+' if pnl >= 0 else ''}${pnl:.2f} ({'+' if r_mult >= 0 else ''}{r_mult:.2f}R) [{reason}]"
+    f"[{tag}] CLOSE {side_upper} {sym} @ {exit_price:.6f} | "
+    f"{pnl_sign}${pnl:.2f} ({r_sign}{r_mult:.2f}R) [{reason}]"
 )
 notify.notify_close(
     pos["symbol"], pos["side"], pos["entry"], exit_price,
@@ -155,19 +155,16 @@ notify.notify_close(
 ```
 
 def evaluate_position(pos, mark_price):
-“””
-Check whether the current mark price has crossed SL or TP for this
-position. If it has, close at the level (TP or SL), not at the live
-mark - this matches the original v2.x behaviour and gives clean,
-backtest-comparable trade records.
+# Check whether the current mark price has crossed SL or TP for this
+# position. If it has, close at the level (TP or SL), not at the live
+# mark - this matches the original v2.x behaviour and gives clean,
+# backtest-comparable trade records.
+# Returns True if the position was closed, else False.
+side = pos[“side”]
+sl = float(pos[“sl”])
+tp = float(pos[“tp”])
 
 ```
-Returns True if the position was closed, else False.
-"""
-side = pos["side"]
-sl = float(pos["sl"])
-tp = float(pos["tp"])
-
 if side == "long":
     if mark_price <= sl:
         close_position(pos, sl, "sl")
@@ -175,7 +172,8 @@ if side == "long":
     elif mark_price >= tp:
         close_position(pos, tp, "tp")
         return True
-else:  # short
+else:
+    # short side
     if mark_price >= sl:
         close_position(pos, sl, "sl")
         return True
@@ -187,7 +185,7 @@ return False
 ```
 
 def run():
-“”“Main polling loop.”””
+# Main polling loop.
 log.info(”=” * 60)
 log.info(“Crypto auto watcher (v3.0) - Binance Futures REST polling”)
 log.info(f”poll every {POLL_INTERVAL}s | resync positions every {RESYNC_INTERVAL}s”)
