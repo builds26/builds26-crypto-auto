@@ -1,33 +1,18 @@
-# “””
-Builds26 Crypto Auto - Position Watcher (v3.0)
+# Builds26 Crypto Auto - Position Watcher (v3.0)
 
-Long-running process that polls Binance Futures REST API for mark prices
-of open paper positions. The moment any open position mark price crosses
-its SL or TP, the watcher closes it in Supabase and fires a Telegram alert
+# REST polling replacement for the v2.x WebSocket watcher.
 
-- within ~3 seconds of the actual touch.
+# Binance Futures WSS endpoints silently drop traffic from Render IPs:
 
-v3.0 replaces the WebSocket-based monitoring of v2.x. Binance Futures WSS
-endpoints (fstream.binance.com) silently drop traffic from Render outbound
-IP range: TCP/WS handshake completes, but no market data is delivered.
-v2.x looked healthy in logs (subscriptions sent, acks received) but
-on_message was never triggered, so positions never closed even when mark
-price clearly crossed SL/TP.
+# the handshake completes but no market data is delivered, so positions
 
-Fix: poll https://fapi.binance.com/fapi/v1/premiumIndex every POLL_INTERVAL
-seconds. One request returns mark prices for ALL futures symbols. Standard
-HTTPS is not subject to the same IP filtering as WSS. Trade-off: ~3s
-latency vs ~1s, which is irrelevant for 1H-candle paper trading.
+# never close. This version polls fapi.binance.com over HTTPS instead.
 
-Runs as a Render Background Worker (continuous, $7/month).
+# Trade-off: roughly 3s latency vs roughly 1s. Irrelevant for 1H paper trading.
 
-Environment variables required:
+# Required env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY,
 
-- SUPABASE_URL
-- SUPABASE_SERVICE_KEY
-- TELEGRAM_BOT_TOKEN (read by notify module)
-- TELEGRAM_CHAT_ID (read by notify module)
-  “””
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 
 import os
 import time
@@ -53,42 +38,28 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 BINANCE_PREMIUM_INDEX = “https://fapi.binance.com/fapi/v1/premiumIndex”
 
-# Polling cadence. 3s gives sub-candle responsiveness while staying well
-
-# inside Binance rate limits (premiumIndex with no symbol is weight 10,
-
-# limit 2400/min - so 3s = 200 calls/min = weight 2000/min, safe).
+# Polling cadence in seconds. 3 is well inside Binance rate limits.
 
 POLL_INTERVAL = 3
 
-# How often to refresh the open positions list from Supabase. Positions
-
-# rarely change (worker opens trades on 1H candle close), so 30s is plenty.
+# How often to refresh the open positions list from Supabase, in seconds.
 
 RESYNC_INTERVAL = 30
 
-# How many consecutive HTTP failures before we log loudly. Transient
-
-# network blips happen; we do not want to spam Telegram or logs over a
-
-# single 500.
+# How many consecutive HTTP failures before we log loudly.
 
 ERROR_LOG_THRESHOLD = 3
 
 def get_open_positions():
-# Fetch all currently-open paper positions from Supabase.
 res = sb.table(“positions”).select(”*”).execute()
 return res.data or []
 
 def get_account():
-# Fetch the single account row (id=1).
 res = sb.table(“account”).select(”*”).eq(“id”, 1).execute()
 return res.data[0] if res.data else None
 
 def fetch_mark_prices():
-# Fetch mark prices for all Binance Futures symbols in one request.
-# Returns dict mapping symbol (e.g. ADAUSDT) to mark price (float).
-# Returns None on failure.
+# Returns dict mapping symbol to mark price (float), or None on failure.
 try:
 r = requests.get(BINANCE_PREMIUM_INDEX, timeout=10)
 r.raise_for_status()
@@ -102,8 +73,6 @@ log.error(f”fetch_mark_prices: parse error: {e}”)
 return None
 
 def close_position(pos, exit_price, reason):
-# Close a position: insert a trade row, delete the position row, update
-# realised PnL on the account, log the close, and send a Telegram alert.
 direction = 1 if pos[“side”] == “long” else -1
 pnl = (exit_price - float(pos[“entry”])) * float(pos[“qty”]) * direction
 r_mult = pnl / float(pos[“risk_usd”])
@@ -155,10 +124,6 @@ notify.notify_close(
 ```
 
 def evaluate_position(pos, mark_price):
-# Check whether the current mark price has crossed SL or TP for this
-# position. If it has, close at the level (TP or SL), not at the live
-# mark - this matches the original v2.x behaviour and gives clean,
-# backtest-comparable trade records.
 # Returns True if the position was closed, else False.
 side = pos[“side”]
 sl = float(pos[“sl”])
@@ -173,7 +138,6 @@ if side == "long":
         close_position(pos, tp, "tp")
         return True
 else:
-    # short side
     if mark_price >= sl:
         close_position(pos, sl, "sl")
         return True
@@ -185,9 +149,8 @@ return False
 ```
 
 def run():
-# Main polling loop.
 log.info(”=” * 60)
-log.info(“Crypto auto watcher (v3.0) - Binance Futures REST polling”)
+log.info(“Crypto auto watcher v3.0 - Binance Futures REST polling”)
 log.info(f”poll every {POLL_INTERVAL}s | resync positions every {RESYNC_INTERVAL}s”)
 log.info(”=” * 60)
 
@@ -199,7 +162,6 @@ consecutive_errors = 0
 while True:
     loop_start = time.time()
 
-    # Refresh open positions from Supabase periodically.
     if loop_start - last_resync >= RESYNC_INTERVAL:
         try:
             positions = get_open_positions()
@@ -209,12 +171,10 @@ while True:
         except Exception as e:
             log.error(f"resync: get_open_positions failed: {e}")
 
-    # If no positions, just sleep and try again next cycle.
     if not positions:
         time.sleep(POLL_INTERVAL)
         continue
 
-    # Fetch latest mark prices for all symbols (one HTTP request).
     prices = fetch_mark_prices()
     if prices is None:
         consecutive_errors += 1
@@ -226,9 +186,6 @@ while True:
         continue
     consecutive_errors = 0
 
-    # Evaluate each open position against its current mark price.
-    # Iterate over a copy so close_position can mutate the underlying
-    # list via the next resync cycle without affecting this loop.
     closed_any = False
     for pos in list(positions):
         symbol = pos["symbol"]
@@ -242,13 +199,9 @@ while True:
         except Exception as e:
             log.error(f"evaluate_position {symbol} failed: {e}")
 
-    # If anything closed, force an immediate resync next cycle so the
-    # in-memory positions list reflects the database.
     if closed_any:
         last_resync = 0.0
 
-    # Sleep for the remainder of the poll interval (so we poll at a
-    # steady cadence regardless of how long the iteration took).
     elapsed = time.time() - loop_start
     sleep_for = max(0.0, POLL_INTERVAL - elapsed)
     time.sleep(sleep_for)
