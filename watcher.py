@@ -26,17 +26,17 @@ import notify
 
 logging.basicConfig(
 level=logging.INFO,
-format=”%(asctime)s [%(levelname)s] %(message)s”,
+format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger(“watcher”)
+log = logging.getLogger("watcher")
 
-SUPABASE_URL = os.environ[“SUPABASE_URL”]
-SUPABASE_KEY = os.environ[“SUPABASE_SERVICE_KEY”]
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Binance Futures REST endpoint - returns mark price for all symbols.
 
-BINANCE_PREMIUM_INDEX = “https://fapi.binance.com/fapi/v1/premiumIndex”
+BINANCE_PREMIUM_INDEX = "https://fapi.binance.com/fapi/v1/premiumIndex"
 
 # Polling cadence in seconds. 3 is well inside Binance rate limits.
 
@@ -51,11 +51,11 @@ RESYNC_INTERVAL = 30
 ERROR_LOG_THRESHOLD = 3
 
 def get_open_positions():
-res = sb.table(“positions”).select(”*”).execute()
+res = sb.table("positions").select("*").execute()
 return res.data or []
 
 def get_account():
-res = sb.table(“account”).select(”*”).eq(“id”, 1).execute()
+res = sb.table("account").select("*").eq("id", 1).execute()
 return res.data[0] if res.data else None
 
 def fetch_mark_prices():
@@ -64,18 +64,18 @@ try:
 r = requests.get(BINANCE_PREMIUM_INDEX, timeout=10)
 r.raise_for_status()
 data = r.json()
-return {row[“symbol”]: float(row[“markPrice”]) for row in data}
+return {row["symbol"]: float(row["markPrice"]) for row in data}
 except requests.exceptions.RequestException as e:
-log.warning(f”fetch_mark_prices: HTTP error: {e}”)
+log.warning(f"fetch_mark_prices: HTTP error: {e}")
 return None
 except (ValueError, KeyError) as e:
-log.error(f”fetch_mark_prices: parse error: {e}”)
+log.error(f"fetch_mark_prices: parse error: {e}")
 return None
 
 def close_position(pos, exit_price, reason):
-direction = 1 if pos[“side”] == “long” else -1
-pnl = (exit_price - float(pos[“entry”])) * float(pos[“qty”]) * direction
-r_mult = pnl / float(pos[“risk_usd”])
+direction = 1 if pos["side"] == "long" else -1
+pnl = (exit_price - float(pos["entry"])) * float(pos["qty"]) * direction
+r_mult = pnl / float(pos["risk_usd"])
 
 ```
 if reason == "tp":
@@ -125,9 +125,9 @@ notify.notify_close(
 
 def evaluate_position(pos, mark_price):
 # Returns True if the position was closed, else False.
-side = pos[“side”]
-sl = float(pos[“sl”])
-tp = float(pos[“tp”])
+side = pos["side"]
+sl = float(pos["sl"])
+tp = float(pos["tp"])
 
 ```
 if side == "long":
@@ -149,10 +149,10 @@ return False
 ```
 
 def run():
-log.info(”=” * 60)
-log.info(“Crypto auto watcher v3.0 - Binance Futures REST polling”)
-log.info(f”poll every {POLL_INTERVAL}s | resync positions every {RESYNC_INTERVAL}s”)
-log.info(”=” * 60)
+log.info("=" * 60)
+log.info("Crypto auto watcher v3.0 - Binance Futures REST polling")
+log.info(f"poll every {POLL_INTERVAL}s | resync positions every {RESYNC_INTERVAL}s")
+log.info("=" * 60)
 
 ```
 positions = []
@@ -207,14 +207,14 @@ while True:
     time.sleep(sleep_for)
 ```
 
-if **name** == “**main**”:
+if **name** == "**main**":
 while True:
 try:
 run()
 except KeyboardInterrupt:
-log.info(“watcher stopped by user”)
+log.info("watcher stopped by user")
 break
 except Exception as e:
-log.error(f”run() crashed: {e}”)
-log.info(“restarting in 5s…”)
+log.error(f"run() crashed: {e}")
+log.info("restarting in 5s…")
 time.sleep(5)
