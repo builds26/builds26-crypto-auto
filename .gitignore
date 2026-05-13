@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# Builds26 — keep these out of git always
+.env
+.env.*
+credentials.md
+*.key
+*.pem
