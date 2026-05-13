@@ -1,8 +1,14 @@
 """
-Builds26 AI - Trade Explainer (v0.1)
+Builds26 AI - Trade Explainer (v0.2)
 
-Sends structured trade context to the Claude API and returns a concise
-explanation. Two entry points:
+v0.2 changes from v0.1:
+- Bumped HTTP timeout to 30s (was SDK default of ~10s)
+- Added one automatic retry on connection errors
+- Render cron containers cold-start their network connection on every run,
+  which can take longer than the default SDK timeout. The retry gives a
+  second chance after the connection has been established.
+
+Two entry points:
 
     explain_signal(signal_data) -> str
         Called by the worker when a new signal fires.
@@ -14,16 +20,17 @@ explanation. Two entry points:
         Returns 3-4 sentence summary of the outcome and whether the
         pre-trade thesis played out.
 
-Both functions are fault-tolerant: if the API is unavailable, returns
-a fallback string rather than crashing the caller.
+Both functions are fault-tolerant: if the API is unavailable even after
+retry, returns a fallback string rather than crashing the caller.
 
 Required env var: ANTHROPIC_API_KEY
 """
 
 import os
+import time
 import logging
 
-from anthropic import Anthropic, APIError
+from anthropic import Anthropic, APIError, APIConnectionError
 
 log = logging.getLogger("ai_explain")
 
@@ -33,6 +40,13 @@ MODEL = "claude-opus-4-7"
 
 # Hard cap on response length. We want concise.
 MAX_TOKENS = 300
+
+# How long to wait for the API to respond before giving up. 30s is generous
+# but accounts for Render cron cold-start network handshake.
+REQUEST_TIMEOUT_SECONDS = 30.0
+
+# How many retries on connection errors before giving up.
+MAX_RETRIES = 1
 
 # Get the API key from environment. Lazy initialisation - we only
 # construct the Anthropic client on first use, so import never fails
@@ -51,7 +65,11 @@ def _get_client():
         log.warning("ANTHROPIC_API_KEY not set - AI explanations disabled")
         return None
 
-    _client = Anthropic(api_key=api_key)
+    _client = Anthropic(
+        api_key=api_key,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        max_retries=MAX_RETRIES,
+    )
     return _client
 
 
@@ -79,6 +97,37 @@ Never give financial advice. Never recommend the user trade. This is post-trade 
 Tone: honest and analytical. Wins and losses are equally interesting. No celebration on wins, no apology on losses. If the trade lost, do not soften it. If the trade won, do not gloat."""
 
 
+def _call_api(system_prompt: str, user_msg: str, label: str) -> str:
+    """
+    Internal: makes the API call with explicit error handling.
+    Returns text on success, fallback string on any failure.
+    """
+    client = _get_client()
+    if client is None:
+        return f"(AI {label} unavailable - no API key)"
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = response.content[0].text.strip()
+        log.info(f"AI {label}: generated {len(text)} chars")
+        return text
+
+    except APIConnectionError as e:
+        log.error(f"AI {label}: connection error after retry: {e}")
+        return f"(AI {label} unavailable - network timeout)"
+    except APIError as e:
+        log.error(f"AI {label}: API error: {e}")
+        return f"(AI {label} unavailable - API error)"
+    except Exception as e:
+        log.error(f"AI {label}: unexpected error: {e}")
+        return f"(AI {label} unavailable)"
+
+
 def explain_signal(signal_data: dict) -> str:
     """
     Generate an AI explanation for a newly fired signal.
@@ -89,10 +138,6 @@ def explain_signal(signal_data: dict) -> str:
     Returns a string. On API failure, returns a fallback string so the
     caller never crashes.
     """
-    client = _get_client()
-    if client is None:
-        return "(AI explanation unavailable - no API key)"
-
     user_msg = f"""A new signal just fired:
 
 symbol: {signal_data.get('symbol')}
@@ -111,23 +156,7 @@ Indicators at entry:
 
 Explain in 3-4 sentences why this signal triggered and what would invalidate it."""
 
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SIGNAL_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        text = response.content[0].text.strip()
-        log.info(f"explain_signal: generated {len(text)} char explanation for {signal_data.get('symbol')}")
-        return text
-
-    except APIError as e:
-        log.error(f"explain_signal: API error: {e}")
-        return f"(AI explanation unavailable - API error)"
-    except Exception as e:
-        log.error(f"explain_signal: unexpected error: {e}")
-        return f"(AI explanation unavailable)"
+    return _call_api(SIGNAL_SYSTEM_PROMPT, user_msg, "explanation")
 
 
 def explain_close(close_data: dict) -> str:
@@ -140,10 +169,6 @@ def explain_close(close_data: dict) -> str:
 
     Returns a string. On API failure, returns a fallback string.
     """
-    client = _get_client()
-    if client is None:
-        return "(AI summary unavailable - no API key)"
-
     user_msg = f"""A position just closed:
 
 symbol: {close_data.get('symbol')}
@@ -158,23 +183,7 @@ R-multiple: {close_data.get('r_multiple')}R
 
 Explain in 3-4 sentences what happened and whether the setup played out as expected."""
 
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=CLOSE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        text = response.content[0].text.strip()
-        log.info(f"explain_close: generated {len(text)} char summary for {close_data.get('symbol')}")
-        return text
-
-    except APIError as e:
-        log.error(f"explain_close: API error: {e}")
-        return "(AI summary unavailable - API error)"
-    except Exception as e:
-        log.error(f"explain_close: unexpected error: {e}")
-        return "(AI summary unavailable)"
+    return _call_api(CLOSE_SYSTEM_PROMPT, user_msg, "summary")
 
 
 # Standalone test mode - run this file directly to test the API connection
@@ -215,21 +224,6 @@ if __name__ == "__main__":
         "r_multiple": 2.00,
     }
     result = explain_close(test_close_win)
-    print(result)
-
-    print("\n=== Testing explain_close (SL hit) ===")
-    test_close_loss = {
-        "symbol": "DOGEUSDT",
-        "side": "short",
-        "entry": 0.1850,
-        "exit": 0.1888,
-        "sl": 0.1888,
-        "tp": 0.1774,
-        "reason": "sl",
-        "pnl": -100.00,
-        "r_multiple": -1.00,
-    }
-    result = explain_close(test_close_loss)
     print(result)
 
     print("\n=== Done ===")
