@@ -1,13 +1,16 @@
 """
-Builds26 Crypto Auto — Paper Trade Worker (v2)
+Builds26 Crypto Auto - Paper Trade Worker (v3)
 ================================================
 Runs on Render cron every 15 min. Scans Binance USDT-M Futures 1H candles
 for the configured coin list, applies the strategy, and OPENS paper positions
 in Supabase.
 
-Position monitoring (SL/TP checks) is handled by watcher.py — a separate
+Position monitoring (SL/TP checks) is handled by watcher.py - a separate
 long-running Render Background Worker that streams live prices via WebSocket
 and closes positions within ~1 second of the actual SL/TP touch.
+
+v3: Calls ai_explain.explain_signal() on every new position open so the
+Telegram alert includes Builds26 AI commentary on why the signal fired.
 
 This is paper trading. No exchange API calls. No real money.
 """
@@ -21,6 +24,7 @@ import requests
 from supabase import create_client, Client
 
 import notify
+import ai_explain
 
 # ---------- Config ----------
 COINS = [
@@ -35,7 +39,7 @@ MAX_CONCURRENT = int(float(os.getenv("MAX_CONCURRENT", "3")))
 ATR_SL_MULT    = float(os.getenv("ATR_SL_MULT",    "1.5"))
 ATR_TP_MULT    = float(os.getenv("ATR_TP_MULT",    "3.0"))
 
-# Binance USDT-M Futures — same paths as Spot but different host
+# Binance USDT-M Futures - same paths as Spot but different host
 FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 
 # ---------- Logging ----------
@@ -120,7 +124,7 @@ def avg_volume(candles, n=20):
 
 
 # ===========================================================================
-# Data — Binance USDT-M Futures public endpoints
+# Data - Binance USDT-M Futures public endpoints
 # ===========================================================================
 def fetch_klines(symbol, interval="1h", limit=200):
     r = requests.get(
@@ -177,6 +181,7 @@ def analyse(candles):
     trend = "up" if e20 > e50 else "down"
     signal = "flat"
     reasons = []
+    macd_state = ""
 
     if (
         trend == "up"
@@ -186,6 +191,7 @@ def analyse(candles):
         and last["close"] > e20
     ):
         signal = "long"
+        macd_state = "bull cross" if m["bull_cross"] else "bullish (hist > 0)"
         reasons.append("MACD bull cross" if m["bull_cross"] else "MACD bullish")
         reasons.append(f"RSI {rsi_now:.0f}")
         reasons.append(f"vol {vol_ratio:.1f}x")
@@ -197,17 +203,20 @@ def analyse(candles):
         and last["close"] < e20
     ):
         signal = "short"
+        macd_state = "bear cross" if m["bear_cross"] else "bearish (hist < 0)"
         reasons.append("MACD bear cross" if m["bear_cross"] else "MACD bearish")
         reasons.append(f"RSI {rsi_now:.0f}")
         reasons.append(f"vol {vol_ratio:.1f}x")
 
     return {
-        "price":   last["close"],
-        "rsi":     rsi_now,
-        "atr":     atr_now,
-        "trend":   trend,
-        "signal":  signal,
-        "reasons": " · ".join(reasons),
+        "price":      last["close"],
+        "rsi":        rsi_now,
+        "atr":        atr_now,
+        "trend":      trend,
+        "signal":     signal,
+        "reasons":    " · ".join(reasons),
+        "macd_state": macd_state,
+        "vol_ratio":  vol_ratio,
     }
 
 
@@ -232,7 +241,7 @@ def get_open_positions():
     return res.data or []
 
 
-def open_position(symbol, a, account):
+def open_position(symbol, a, account, funding_pct):
     open_positions = get_open_positions()
     if len(open_positions) >= MAX_CONCURRENT:
         log.info(f"skip {symbol}: at max concurrent ({MAX_CONCURRENT})")
@@ -265,7 +274,27 @@ def open_position(symbol, a, account):
         f"OPEN {a['signal'].upper()} {symbol} @ {entry:.4f} · "
         f"SL {sl:.4f} · TP {tp:.4f} · risk ${risk_usd:.2f} · {a['reasons']}"
     )
-    notify.notify_open(symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"])
+
+    # v3: Builds26 AI commentary on why this signal fired.
+    # ai_explain returns a fallback string if API fails - never raises.
+    ai_text = ai_explain.explain_signal({
+        "symbol":       symbol,
+        "side":         a["signal"],
+        "entry":        round(entry, 6),
+        "sl":           round(sl, 6),
+        "tp":           round(tp, 6),
+        "risk_usd":     round(risk_usd, 2),
+        "rsi":          round(a["rsi"], 1),
+        "trend":        a["trend"],
+        "macd":         a["macd_state"],
+        "volume_ratio": round(a["vol_ratio"], 2),
+        "funding_pct":  round(funding_pct, 4),
+    })
+
+    notify.notify_open(
+        symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"],
+        ai_explanation=ai_text,
+    )
 
 
 # ===========================================================================
@@ -273,7 +302,7 @@ def open_position(symbol, a, account):
 # ===========================================================================
 def run():
     log.info("=" * 60)
-    log.info("Crypto auto worker (v2) — paper trade scan · Binance Futures")
+    log.info("Crypto auto worker (v3) - paper trade scan · Binance Futures")
     log.info(
         f"risk={RISK_PCT}% lev={LEVERAGE}x max_concurrent={MAX_CONCURRENT} "
         f"atr_sl={ATR_SL_MULT} atr_tp={ATR_TP_MULT}"
@@ -281,7 +310,7 @@ def run():
 
     account = get_account()
     if not account:
-        log.error("No account row found — did you run the SQL setup?")
+        log.error("No account row found - did you run the SQL setup?")
         return
     if not account.get("is_running", True):
         log.info("Account is_running=false, skipping scan")
@@ -305,10 +334,10 @@ def run():
 
             if a["signal"] != "flat":
                 log.info(
-                    f"{symbol} → {a['signal'].upper()} ({a['reasons']}) · "
+                    f"{symbol} -> {a['signal'].upper()} ({a['reasons']}) · "
                     f"funding {funding_pct:+.4f}%/8h"
                 )
-                open_position(symbol, a, account)
+                open_position(symbol, a, account, funding_pct)
                 account = get_account()
             else:
                 log.info(

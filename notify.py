@@ -2,6 +2,9 @@
 Telegram notifications for crypto-auto.
 Sends formatted alerts on position open, position close, and daily digest.
 Falls back gracefully if env vars aren't set (so worker still runs without notifications).
+
+v3: notify_open and notify_close now accept an optional ai_explanation parameter
+that gets appended to the message after the structured stats.
 """
 
 import os
@@ -17,7 +20,7 @@ CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 def _send(text: str):
     """Low-level send. Markdown-formatted, silent fail (logs the error)."""
     if not BOT_TOKEN or not CHAT_ID:
-        log.warning("Telegram not configured — skipping notification")
+        log.warning("Telegram not configured - skipping notification")
         return
     try:
         r = requests.post(
@@ -47,7 +50,22 @@ def fmt_price(p):
     return f"{p:.6f}"
 
 
-def notify_open(symbol: str, side: str, entry, sl, tp, risk_usd, reasons: str):
+def _format_ai_block(ai_explanation: str) -> str:
+    """
+    Format the AI explanation for appending to a Telegram message.
+    Returns empty string if no explanation given.
+    Visual separator + italicised text underneath, with an AI label.
+    """
+    if not ai_explanation:
+        return ""
+    # Strip any markdown asterisks Claude might have included, to avoid
+    # breaking Telegram's Markdown parser.
+    safe = ai_explanation.replace("*", "").replace("_", "")
+    return f"\n\n---\n_🤖 Builds26 AI_\n{safe}"
+
+
+def notify_open(symbol: str, side: str, entry, sl, tp, risk_usd, reasons: str,
+                ai_explanation: str = ""):
     """Sent immediately when a paper position opens."""
     arrow = "🟢 LONG" if side == "long" else "🔴 SHORT"
     coin = symbol.replace("USDT", "")
@@ -58,11 +76,13 @@ def notify_open(symbol: str, side: str, entry, sl, tp, risk_usd, reasons: str):
         f"`TP     ` {fmt_price(tp)}\n"
         f"`Risk   ` ${float(risk_usd):.2f}\n"
         f"\n_{reasons}_"
+        f"{_format_ai_block(ai_explanation)}"
     )
     _send(msg)
 
 
-def notify_close(symbol: str, side: str, entry, exit_price, pnl, r_mult, result: str, reason: str):
+def notify_close(symbol: str, side: str, entry, exit_price, pnl, r_mult,
+                 result: str, reason: str, ai_explanation: str = ""):
     """Sent when a position closes (SL or TP hit)."""
     if result == "win":
         tag = "✅ WIN"
@@ -83,6 +103,7 @@ def notify_close(symbol: str, side: str, entry, exit_price, pnl, r_mult, result:
         f"`Entry  ` {fmt_price(entry)}\n"
         f"`Exit   ` {fmt_price(exit_price)}  ({reason.upper()})\n"
         f"`P&L    ` {pnl_s}  ({r_s})"
+        f"{_format_ai_block(ai_explanation)}"
     )
     _send(msg)
 
@@ -98,7 +119,7 @@ def notify_digest(equity, starting, realised, open_positions, trades_today, tota
     real_s = f"{'+' if real >= 0 else ''}${real:.2f}"
 
     lines = [
-        "*📊 Daily Digest — Crypto Auto*",
+        "*📊 Daily Digest - Crypto Auto*",
         "",
         f"`Equity   ` ${eq:.2f} ({pct_s})",
         f"`Realised ` {real_s}",
@@ -112,7 +133,7 @@ def notify_digest(equity, starting, realised, open_positions, trades_today, tota
         bes_t = sum(1 for t in trades_today if t["result"] == "be")
         pnl_t = sum(float(t["pnl"]) for t in trades_today)
         pnl_t_s = f"{'+' if pnl_t >= 0 else ''}${pnl_t:.2f}"
-        lines.append(f"*Last 24h:* {len(trades_today)} trade(s) — {wins_t}W / {losses_t}L / {bes_t}BE — {pnl_t_s}")
+        lines.append(f"*Last 24h:* {len(trades_today)} trade(s) - {wins_t}W / {losses_t}L / {bes_t}BE - {pnl_t_s}")
     else:
         lines.append("_No trades resolved in last 24h_")
 
@@ -123,7 +144,7 @@ def notify_digest(equity, starting, realised, open_positions, trades_today, tota
         lines.append(f"*All-time:* {total_trades} trades · WR {wr_s} · Expectancy {ex_s}/trade")
     else:
         lines.append("")
-        lines.append("_No resolved trades yet — strategy is filtering hard, watching for setups_")
+        lines.append("_No resolved trades yet - strategy is filtering hard, watching for setups_")
 
     if open_positions:
         lines.append("")
