@@ -30,7 +30,7 @@ import ai_explain
 COINS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
     "XRPUSDT", "ADAUSDT", "AVAXUSDT", "DOGEUSDT",
-    "LINKUSDT", "MATICUSDT", "DOTUSDT", "LTCUSDT",
+    "LINKUSDT", "DOTUSDT", "LTCUSDT",
 ]
 
 RISK_PCT       = float(os.getenv("RISK_PCT",       "1.0"))
