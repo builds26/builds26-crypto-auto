@@ -1,5 +1,5 @@
 """
-Builds26 Crypto Auto - Paper Trade Worker (v3)
+Builds26 Crypto Auto - Paper Trade Worker (v3.2)
 ================================================
 Runs on Render cron every 15 min. Scans Binance USDT-M Futures 1H candles
 for the configured coin list, applies the strategy, and OPENS paper positions
@@ -9,8 +9,8 @@ Position monitoring (SL/TP checks) is handled by watcher.py - a separate
 long-running Render Background Worker that streams live prices via WebSocket
 and closes positions within ~1 second of the actual SL/TP touch.
 
-v3: Calls ai_explain.explain_signal() on every new position open so the
-Telegram alert includes Builds26 AI commentary on why the signal fired.
+v3.2: Removed real-time ai_explain calls. Daily Claude summary is now handled
+by eod_summary.py at 22:00 UTC; worker.py no longer talks to Anthropic.
 
 This is paper trading. No exchange API calls. No real money.
 """
@@ -24,7 +24,6 @@ import requests
 from supabase import create_client, Client
 
 import notify
-import ai_explain
 
 # ---------- Config ----------
 COINS = [
@@ -275,25 +274,8 @@ def open_position(symbol, a, account, funding_pct):
         f"SL {sl:.4f} · TP {tp:.4f} · risk ${risk_usd:.2f} · {a['reasons']}"
     )
 
-    # v3: Builds26 AI commentary on why this signal fired.
-    # ai_explain returns a fallback string if API fails - never raises.
-    ai_text = ai_explain.explain_signal({
-        "symbol":       symbol,
-        "side":         a["signal"],
-        "entry":        round(entry, 6),
-        "sl":           round(sl, 6),
-        "tp":           round(tp, 6),
-        "risk_usd":     round(risk_usd, 2),
-        "rsi":          round(a["rsi"], 1),
-        "trend":        a["trend"],
-        "macd":         a["macd_state"],
-        "volume_ratio": round(a["vol_ratio"], 2),
-        "funding_pct":  round(funding_pct, 4),
-    })
-
     notify.notify_open(
         symbol, a["signal"], entry, sl, tp, risk_usd, a["reasons"],
-        ai_explanation=ai_text,
     )
 
 

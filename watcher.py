@@ -1,4 +1,4 @@
-# Builds26 Crypto Auto - Position Watcher (v3.1)
+# Builds26 Crypto Auto - Position Watcher (v3.2)
 #
 # REST polling replacement for the v2.x WebSocket watcher.
 # Binance Futures WSS endpoints silently drop traffic from Render IPs:
@@ -6,11 +6,12 @@
 # never close. This version polls fapi.binance.com over HTTPS instead.
 # Trade-off: roughly 3s latency vs roughly 1s. Irrelevant for 1H paper trading.
 #
-# v3.1: Calls ai_explain.explain_close() on every resolved trade so the
-# Telegram close alert includes Builds26 AI commentary on the outcome.
+# v3.2: Removed real-time ai_explain calls. Daily Claude summary is now
+# handled by eod_summary.py at 22:00 UTC; watcher.py no longer talks to
+# Anthropic.
 #
 # Required env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY,
-# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY.
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
 
 import os
 import time
@@ -21,7 +22,6 @@ import requests
 from supabase import create_client, Client
 
 import notify
-import ai_explain
 
 logging.basicConfig(
     level=logging.INFO,
@@ -109,24 +109,9 @@ def close_position(pos, exit_price, reason):
         f"{pnl_sign}${pnl:.2f} ({r_sign}{r_mult:.2f}R) [{reason}]"
     )
 
-    # v3.1: Builds26 AI post-trade commentary.
-    # ai_explain returns a fallback string if API fails - never raises.
-    ai_text = ai_explain.explain_close({
-        "symbol":     pos["symbol"],
-        "side":       pos["side"],
-        "entry":      round(float(pos["entry"]), 6),
-        "exit":       round(float(exit_price), 6),
-        "sl":         round(float(pos["sl"]), 6),
-        "tp":         round(float(pos["tp"]), 6),
-        "pnl":        round(float(pnl), 2),
-        "r_multiple": round(float(r_mult), 2),
-        "reason":     reason,
-    })
-
     notify.notify_close(
         pos["symbol"], pos["side"], pos["entry"], exit_price,
         pnl, r_mult, result, reason,
-        ai_explanation=ai_text,
     )
 
 
@@ -156,7 +141,7 @@ def evaluate_position(pos, mark_price):
 
 def run():
     log.info("=" * 60)
-    log.info("Crypto auto watcher v3.1 - REST polling + Builds26 AI commentary")
+    log.info("Crypto auto watcher v3.2 - REST polling")
     log.info(f"poll every {POLL_INTERVAL}s | resync positions every {RESYNC_INTERVAL}s")
     log.info("=" * 60)
 

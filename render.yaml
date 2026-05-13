@@ -21,3 +21,62 @@ services:
         value: "1.5"
       - key: ATR_TP_MULT
         value: "3.0"
+
+# ---------------------------------------------------------------------------
+# Services below are created manually in the Render dashboard; YAML provided
+# for documentation/reference only. Editing this block does NOT change what
+# is deployed — update the dashboard directly. Names/plans may differ from
+# whatever is actually configured in the dashboard; treat this as a schematic.
+# ---------------------------------------------------------------------------
+#
+#   - type: worker
+#     name: crypto-auto-watcher
+#     runtime: python
+#     plan: starter
+#     buildCommand: "pip install -r requirements.txt"
+#     startCommand: "python watcher.py"
+#     envVars:
+#       - key: SUPABASE_URL
+#         sync: false
+#       - key: SUPABASE_SERVICE_KEY
+#         sync: false
+#       - key: TELEGRAM_BOT_TOKEN
+#         sync: false
+#       - key: TELEGRAM_CHAT_ID
+#         sync: false
+#
+#   - type: cron
+#     name: crypto-auto-digest
+#     runtime: python
+#     plan: starter
+#     schedule: "0 8 * * *"          # 08:00 UTC daily
+#     buildCommand: "pip install -r requirements.txt"
+#     startCommand: "python digest.py"
+#     envVars:
+#       - key: SUPABASE_URL
+#         sync: false
+#       - key: SUPABASE_SERVICE_KEY
+#         sync: false
+#       - key: TELEGRAM_BOT_TOKEN
+#         sync: false
+#       - key: TELEGRAM_CHAT_ID
+#         sync: false
+#
+#   - type: cron
+#     name: crypto-auto-eod
+#     runtime: python
+#     plan: starter
+#     schedule: "0 22 * * *"         # 22:00 UTC daily - Builds26 AI v0.3
+#     buildCommand: "pip install -r requirements.txt"
+#     startCommand: "python eod_summary.py"
+#     envVars:
+#       - key: SUPABASE_URL
+#         sync: false
+#       - key: SUPABASE_SERVICE_KEY
+#         sync: false
+#       - key: TELEGRAM_BOT_TOKEN
+#         sync: false
+#       - key: TELEGRAM_CHAT_ID
+#         sync: false
+#       - key: ANTHROPIC_API_KEY
+#         sync: false
